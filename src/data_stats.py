@@ -6,16 +6,18 @@ import matplotlib.pyplot as plt
 
 ratings = np.loadtxt("../data/ratings.csv", delimiter=',')
 
-#Printing stats for the ratings
-print(stats.describe(ratings[:,2]))
+# Printing stats for the ratings
+print(stats.describe(ratings[:,0]).minmax)
+# print(stats.describe(ratings[:,1]))
+# print(stats.describe(ratings[:,2]))
 
-#Printing distribution of ratings
-val = ratings[:,2].astype(int)
-counts = np.bincount(val)
-print(counts)
+# # Printing distribution of ratings
+# val = ratings[:,2].astype(int)
+# counts = np.bincount(val)
+# print(counts)
 
-plt.hist(counts.T, normed=True)
-plt.show()
+# plt.hist(counts.T, normed=True)
+# plt.show()
 
 
 
