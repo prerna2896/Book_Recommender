@@ -2,6 +2,7 @@ import os
 import time
 import sys
 import numpy as np
+import random
 from scipy import stats
 
 import matplotlib
@@ -29,7 +30,7 @@ DEVICE                      = torch.device("cuda" if torch.cuda.is_available() e
 # Constants for the data set 
 DATASET_FILE                = "../data/ratings.csv"
 
-UNKNOWN_RATING              = 99
+UNKNOWN_RATING              = 0
 MIN_RATING                  = 1
 MAX_RATING                  = 5
 
@@ -46,6 +47,7 @@ LEARNING_RATE               = 0.04
 WEIGHT_DECAY                = 0.0
 LOSS_FUNCTION               = 'RMSE'
 NUM_ITERATIONS              = 200
+BATCH_SIZE                  = 1113
 OPTIMIZER                   = 'Adam'
 MODEL_NAME                  = 'model.stackedAutoencoder'
 
@@ -57,15 +59,12 @@ print("Initializing...")
 ####################################################################################################
 
 # Load the data from the file
-raw_data = np.loadtxt(DATASET_FILE, dtype=np.float, delimiter=",")
+raw_data = np.loadtxt(DATASET_FILE, dtype=np.int, delimiter=",")
 num_users = int(stats.describe(raw_data[:,0]).minmax[1])
 num_books = int(stats.describe(raw_data[:,1]).minmax[1])
 data = np.zeros(shape=(num_users, num_books))
-
-for row in raw_data:
-    user = int(row[0] - 1)
-    book = int(row[1] - 1)
-    data[user, book] = row[2] 
+data.fill(UNKNOWN_RATING)
+data[raw_data[:,0] - 1, raw_data[:,1] - 1] = raw_data[:,2]
 
 # Normalize the data
 np.random.shuffle(data)
@@ -90,10 +89,9 @@ train_data  [num_dev_test_users : , num_dev_test_books  :               ]   = UN
 dev_data    [num_dev_test_users : , -num_dev_test_books : -num_dev_books]   = data[num_dev_test_users : , -num_dev_test_books   : -num_dev_books]
 test_data   [num_dev_test_users : , -num_dev_books      :               ]   = data[num_dev_test_users : , -num_dev_books        :               ]
 
-
-train_data  = torch.tensor(train_data,  device = DEVICE, dtype=torch.float)
-dev_data    = torch.tensor(dev_data,    device = DEVICE, dtype=torch.float)
-test_data   = torch.tensor(test_data,   device = DEVICE, dtype=torch.float)
+# train_data  = torch.tensor(train_data,  device = DEVICE, dtype=torch.float)
+# dev_data    = torch.tensor(dev_data,    device = DEVICE, dtype=torch.float)
+# test_data   = torch.tensor(test_data,   device = DEVICE, dtype=torch.float)
 
 ####################################################################################################
 # STACKED AUTOENCODER MODEL
@@ -155,8 +153,7 @@ def Precision_Recall_TopK(predicted, actual, K = 10):
     return precision, recall, F1
 
 
-# MMSE Loss function
-def MMSE_Loss(predicted, actual):
+def Absolute_Square_Error(predicted, actual):
     # Get the mask
     mask        = actual != UNKNOWN_RATING
     mask        = mask.float()  
@@ -172,24 +169,19 @@ def MMSE_Loss(predicted, actual):
     error       = torch.sum((actual - predicted) ** 2)
     return error, num_ratings
 
-# RMSE Loss function
-def RMSE_Loss(predicted, actual):
-    error, num_ratings = MMSE_Loss(predicted, actual)
-    return (error / num_ratings) ** 0.5
-
-def getLoss(predicted, actual, loss_function='MMSE'):
+def getLoss(error, num_ratings, loss_function='MMSE'):
+    num_ratings += 1e-5
     if (loss_function == 'MMSE'):
-        error, num_ratings = MMSE_Loss(predicted, actual)
         return error / num_ratings
     elif (loss_function == 'RMSE'):
-        return RMSE_Loss(predicted, actual)
+        return (error / num_ratings) ** 0.5
 
 ####################################################################################################
 # TRAIN AND TEST
 ####################################################################################################
 
-def train(hidden_dim, activation, num_stacks, learing_rate, weight_decay, loss_function, num_iterations, optimizer, calculate_precision = False, save_model = False):
-        # Training on train data
+def train(hidden_dim, activation, num_stacks, learing_rate, weight_decay, loss_function, num_iterations, optimizer, save_model = False):
+    # Training on train data
     stackedAutoEncoder  = StackedAutoEncoder(hidden_dim = hidden_dim, activation = activation, num_stacks = num_stacks).to(DEVICE)
 
     if optimizer.lower() == 'adam':
@@ -209,23 +201,34 @@ def train(hidden_dim, activation, num_stacks, learing_rate, weight_decay, loss_f
     start_time          = time.time()
     for i in range(num_iterations):
         n = int(i / (num_iterations / num_stacks)) + 1
-        predicted_ratings = stackedAutoEncoder(train_data, n)
 
-        opt.zero_grad() 
-        loss = getLoss(predicted_ratings, train_data, loss_function)
-        loss.backward()
+        opt.zero_grad()
+        
+        total_error = 0
+        total_ratings = 0
+        num_batches = num_users // BATCH_SIZE
+        for batch in range(num_batches):
+            next_batch = torch.tensor(train_data[batch * BATCH_SIZE : (batch + 1) * BATCH_SIZE],  device = DEVICE, dtype=torch.float)
+            predicted_ratings = stackedAutoEncoder(next_batch, n)
+            error_ratings = Absolute_Square_Error(predicted_ratings, next_batch)
+            loss = getLoss(error_ratings[0], error_ratings[1], loss_function)
+            total_error += float(error_ratings[0])
+            total_ratings += float(error_ratings[1])
+            loss.backward()
+        total_loss = getLoss(total_error, total_ratings, loss_function)
+        
         opt.step()
 
         end_time = time.time() - start_time
 
-        epoch_train_loss.append((i + 1, loss.data.item()))
-        time_train_loss.append((end_time, loss.data.item()))
+        epoch_train_loss.append((i + 1, total_loss))
+        time_train_loss.append((end_time, total_loss))
 
         dev_loss = dev(stackedAutoEncoder, loss_function, n)
         epoch_dev_loss.append((i + 1, dev_loss))
         time_dev_loss.append((end_time, dev_loss))
 
-        print("Epoch #", (i + 1), ":\t Training loss: ", round(loss.data.item(), 8), "\t Dev loss: ", round(dev_loss, 8))
+        print("Epoch #", (i + 1), ":\t Training loss: ", round(total_loss, 8), "\t Dev loss: ", round(dev_loss, 8))
 
 
     print("Training finished.\n")
@@ -234,48 +237,41 @@ def train(hidden_dim, activation, num_stacks, learing_rate, weight_decay, loss_f
         print("Saving model...")
         torch.save(stackedAutoEncoder, MODEL_NAME)
         print("Saved model.\n")
- 
-    if (calculate_precision):
-        precision_train,    recall_train,   F1_train    = Precision_Recall_TopK(stackedAutoEncoder(train_data, num_stacks), train_data)
-        precision_dev,      recall_dev,     F1_dev      = Precision_Recall_TopK(stackedAutoEncoder(dev_data, num_stacks), dev_data)
-
-        print("Precision of train data: " + str(precision_train))
-        print("Recall on train data: " + str(recall_train))
-        print("F1 score for train data: " + str(F1_train))
-        print()
-
-        print("Precision of dev data: " + str(precision_dev))
-        print("Recall on dev data: " + str(recall_dev))
-        print("F1 score for dev data: " + str(F1_dev))
-        print()
-
-        train_metrics   = (epoch_train_loss, time_train_loss, precision_train, recall_train, F1_train)
-        dev_metrics     = (epoch_dev_loss, time_dev_loss, precision_dev, recall_dev, F1_dev)
-        return (train_metrics, dev_metrics)
    
     train_metrics   = (epoch_train_loss, time_train_loss)
     dev_metrics     = (epoch_dev_loss, time_dev_loss)
     return (train_metrics, dev_metrics)
 
 def dev(model, loss_function, num_stacks):
-    predicted_ratings = model(dev_data, num_stacks)
-    dev_loss = getLoss(predicted_ratings, dev_data, loss_function).data.item()
+    total_error = 0
+    total_ratings = 0
+    num_batches = num_users // BATCH_SIZE
+    for batch in range(num_batches):
+        next_batch = torch.tensor(dev_data[batch * BATCH_SIZE : (batch + 1) * BATCH_SIZE],  device = DEVICE, dtype=torch.float)
+        predicted_ratings = model(next_batch, num_stacks)
+        error_ratings = Absolute_Square_Error(predicted_ratings, next_batch)
+        total_error += float(error_ratings[0])
+        total_ratings += float(error_ratings[1])
+    dev_loss = getLoss(total_error, total_ratings, loss_function)
     return dev_loss
 
 def test(model, loss_function, num_stacks):
     print("Testing...")
-    predicted_ratings = model(test_data, num_stacks)
-    test_loss = getLoss(predicted_ratings, test_data, loss_function).data.item()
+    total_error = 0
+    total_ratings = 0
+    num_batches = num_users // BATCH_SIZE
+    for batch in range(num_batches):
+        next_batch = torch.tensor(test_data[batch * BATCH_SIZE : (batch + 1) * BATCH_SIZE],  device = DEVICE, dtype=torch.float)
+        predicted_ratings = model(next_batch, num_stacks)
+        error_ratings = Absolute_Square_Error(predicted_ratings, next_batch)
+        total_error += float(error_ratings[0])
+        total_ratings += float(error_ratings[1])
+    test_loss = getLoss(total_error, total_ratings, loss_function)
     print("Loss on test data: ", test_loss)
-
-    precision_test, recall_test, f1_test = Precision_Recall_TopK(stackedAutoEncoder(test_data, num_stacks), test_data)
-    print("Precision of test data: " + str(precision_test))
-    print("Recall on test data: " + str(recall_test))
-    print("F1 on test data: " + str(f1_test))
 
     print("\n")
 
-    return test_loss, precision_test, recall_test
+    return test_loss
 
 ####################################################################################################
 # EXPERIMENTATION
@@ -297,20 +293,6 @@ def plot_images(plot_data, labels, xlabel, ylabel, filename):
     plt.savefig(filename)
     plt.clf()
 
-def write_precision_recall(label, train_metrics, dev_metrics):
-    with open("images/PrecisionRecall.txt", 'a') as f:
-        f.write(label + '\n\n')
-
-        f.write("Precision Train: " + str(train_metrics[2]) + '\n')
-        f.write("Recall Train: "    + str(train_metrics[3]) + '\n')
-        f.write("F1 Train: "        + str(train_metrics[4]) + '\n\n')
-
-        f.write("Precision Dev: "   + str(dev_metrics[2]) + '\n')
-        f.write("Recall Dev: "      + str(dev_metrics[3]) + '\n')
-        f.write("F1 Dev: "          + str(dev_metrics[4]) + '\n\n')
-
-        f.write('\n\n')
-
 def experiment_learning_rate():
     print("Experimenting with learning rate...")
     learning_rates = [0.01, 0.02, 0.03, 0.04, 0.06, 0.08]
@@ -320,15 +302,14 @@ def experiment_learning_rate():
     labels = []
     for learning_rate in learning_rates:
         print("Trying learning rate: " + str(learning_rate))
-        train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, NUM_STACKS, learning_rate, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, calculate_precision = True, save_model = False)
+        train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, NUM_STACKS, learning_rate, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, save_model = False)
         plot_data_train.append(train_metrics[0])
         plot_data_dev.append(dev_metrics[0])
         label = "Learning rate: " + str(learning_rate)
         labels.append(label)
-        write_precision_recall(label, train_metrics, dev_metrics)
 
-    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "images/VaryingLearningRate_RMSE_Train.png")
-    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "images/VaryingLearningRate_RMSE_Dev.png")
+    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "../images/VaryingLearningRate_RMSE_Train.png")
+    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/VaryingLearningRate_RMSE_Dev.png")
 
 
 def experiment_hidden_dim():
@@ -340,15 +321,14 @@ def experiment_hidden_dim():
     labels = []
     for hidden_dim in hidden_dims:
         print("Trying hidden dimension: " + str(hidden_dim))
-        train_metrics, dev_metrics = train(hidden_dim, ACTIVATION, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, calculate_precision = True, save_model = False)
+        train_metrics, dev_metrics = train(hidden_dim, ACTIVATION, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, save_model = False)
         plot_data_train.append(train_metrics[0])
         plot_data_dev.append(dev_metrics[0])
         label = "Hidden dimension: " + str(hidden_dim)
         labels.append(label)
-        write_precision_recall(label, train_metrics, dev_metrics)
 
-    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "images/VaryingHiddenDim_RMSE_Train.png")
-    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "images/VaryingHiddenDim_RMSE_Dev.png")
+    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "../images/VaryingHiddenDim_RMSE_Train.png")
+    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/VaryingHiddenDim_RMSE_Dev.png")
 
 
 def experiment_num_stack():
@@ -360,15 +340,14 @@ def experiment_num_stack():
     labels = []
     for num_stack in num_stacks:
         print("Trying number of stacks: " + str(num_stack))
-        train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, num_stack, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, calculate_precision = True, save_model = False)
+        train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, num_stack, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, save_model = False)
         plot_data_train.append(train_metrics[0])
         plot_data_dev.append(dev_metrics[0])
         label = "Number of stacks: " + str(num_stack)
         labels.append(label)
-        write_precision_recall(label, train_metrics, dev_metrics)
 
-    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "images/VaryingNumStack_RMSE_Train.png")
-    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "images/VaryingNumStack_RMSE_Dev.png")
+    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "../images/VaryingNumStack_RMSE_Train.png")
+    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/VaryingNumStack_RMSE_Dev.png")
 
 
 def experiment_optimizer():
@@ -380,15 +359,14 @@ def experiment_optimizer():
     labels = []
     for optimizer in optimizers:
         print("Trying optimizer: " + str(optimizer))
-        train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, optimizer, calculate_precision = True, save_model = False)
+        train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, optimizer, save_model = False)
         plot_data_train.append(train_metrics[0])
         plot_data_dev.append(dev_metrics[0])
         label = "Optimizer: " + str(optimizer)
         labels.append(label)
-        write_precision_recall(label, train_metrics, dev_metrics)
 
-    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "images/VaryingOptimizer_RMSE_Train.png")
-    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "images/VaryingOptimizer_RMSE_Dev.png")
+    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "../images/VaryingOptimizer_RMSE_Train.png")
+    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/VaryingOptimizer_RMSE_Dev.png")
 
 def experiment_activation():
     print("Experimenting with activation function...")
@@ -399,19 +377,16 @@ def experiment_activation():
     labels = []
     for activation in activations:
         print("Trying activation: " + str(activation))
-        train_metrics, dev_metrics = train(HIDDEN_DIM, activation, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, calculate_precision = True, save_model = False)
+        train_metrics, dev_metrics = train(HIDDEN_DIM, activation, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, "RMSE", NUM_ITERATIONS, OPTIMIZER, save_model = False)
         plot_data_train.append(train_metrics[0])
         plot_data_dev.append(dev_metrics[0])
         label = "Activation: " + str(activation)
         labels.append(label)
-        write_precision_recall(label, train_metrics, dev_metrics)
 
-    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "images/VaryingActivation_RMSE_Train.png")
-    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "images/VaryingActivation_RMSE_Dev.png")
+    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "../images/VaryingActivation_RMSE_Train.png")
+    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/VaryingActivation_RMSE_Dev.png")
 
 def run_experiments():
-    if os.path.exists("images/PrecisionRecall.txt"):
-        os.remove("images/PrecisionRecall.txt")
     experiment_learning_rate()
     experiment_hidden_dim()
     experiment_num_stack()
@@ -432,7 +407,7 @@ if (mode == 'train'):
     time_data_dev       = []
     labels = []
 
-    train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, LOSS_FUNCTION, NUM_ITERATIONS, OPTIMIZER, calculate_precision=True, save_model=True)
+    train_metrics, dev_metrics = train(HIDDEN_DIM, ACTIVATION, NUM_STACKS, LEARNING_RATE, WEIGHT_DECAY, LOSS_FUNCTION, NUM_ITERATIONS, OPTIMIZER, save_model=True)
 
     plot_data_train.append(train_metrics[0])
     plot_data_dev.append(dev_metrics[0])
@@ -441,12 +416,12 @@ if (mode == 'train'):
     label = "Deep Autoencoder"
     labels.append(label)
 
-    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "images/StackedAutoencoder_RMSE_Train.png")
-    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "images/StackedAutoencoder_RMSE_Dev.png")
-    plot_images(time_data_train, labels, "Time", "Root Mean squared error", "images/StackedAutoencoder_RMSE_Train_Timed.png")
-    plot_images(time_data_dev, labels, "Time", "Root Mean squared error", "images/StackedAutoencoder_RMSE_Dev_Timed.png")
+    plot_images(plot_data_train, labels, "Epoch", "Root Mean squared error", "../images/StackedAutoencoder_RMSE_Train.png")
+    plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/StackedAutoencoder_RMSE_Dev.png")
+    plot_images(time_data_train, labels, "Time", "Root Mean squared error", "../images/StackedAutoencoder_RMSE_Train_Timed.png")
+    plot_images(time_data_dev, labels, "Time", "Root Mean squared error", "../images/StackedAutoencoder_RMSE_Dev_Timed.png")
 
-    with open("images/Time_Error.txt", "a") as f:
+    with open("../images/Time_Error.txt", "a") as f:
         f.write(','.join(str(data[0]) for data in train_metrics[1]))
         f.write('\n')
         f.write(','.join(str(data[1]) for data in train_metrics[1]))
@@ -460,7 +435,7 @@ if (mode == 'train'):
 elif (mode == 'test'):
     # Testing on test data
     print("Loading model...")
-    stackedAutoEncoder = torch.load(MODEL_NAME)
+    stackedAutoEncoder = torch.load(MODEL_NAME, map_location = torch.device(DEVICE))
     print("Loaded model.")
 
     test(stackedAutoEncoder, LOSS_FUNCTION, NUM_STACKS)
