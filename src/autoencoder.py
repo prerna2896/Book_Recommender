@@ -41,13 +41,13 @@ NUM_DEV_TEST_BOOKS          = NUM_DEV_BOOKS + NUM_TEST_BOOKS
 
 # Hyperparameters for the model
 ACTIVATION                  = 'Sigmoid'
-HIDDEN_DIM                  = 32
+HIDDEN_DIM                  = 64
 NUM_STACKS                  = 4
 LEARNING_RATE               = 0.04
 WEIGHT_DECAY                = 0.0
 LOSS_FUNCTION               = 'RMSE'
 NUM_ITERATIONS              = 200
-BATCH_SIZE                  = 1113
+BATCH_SIZE                  = 1113 * 6
 OPTIMIZER                   = 'Adam'
 MODEL_NAME                  = 'model.stackedAutoencoder'
 
@@ -314,7 +314,7 @@ def experiment_learning_rate():
 
 def experiment_hidden_dim():
     print("Experimenting with hidden dimensions...")
-    hidden_dims = [8, 16, 32, 64]
+    hidden_dims = [16, 32, 64, 128]
 
     plot_data_train = []
     plot_data_dev = []
@@ -333,7 +333,7 @@ def experiment_hidden_dim():
 
 def experiment_num_stack():
     print("Experimenting with number of stacks...")
-    num_stacks = [4, 5, 8, 10, 20]
+    num_stacks = [4, 5, 8, 10]
 
     plot_data_train = []
     plot_data_dev = []
@@ -387,11 +387,11 @@ def experiment_activation():
     plot_images(plot_data_dev, labels, "Epoch", "Root Mean squared error", "../images/VaryingActivation_RMSE_Dev.png")
 
 def run_experiments():
-    experiment_learning_rate()
+    # experiment_learning_rate()
     experiment_hidden_dim()
     experiment_num_stack()
-    experiment_optimizer()
-    experiment_activation()
+    # experiment_optimizer()
+    # experiment_activation()
 
 ####################################################################################################
 # USER INTERACTION FOR TRAINING AND TESTING MODELS
