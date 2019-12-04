@@ -389,7 +389,7 @@ def experiment_activation():
 def run_experiments():
     # experiment_learning_rate()
     experiment_hidden_dim()
-    experiment_num_stack()
+    # experiment_num_stack()
     # experiment_optimizer()
     # experiment_activation()
 
